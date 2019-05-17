@@ -1,0 +1,538 @@
+---
+title: "HW 3 - Customer Segmentation for Sun Country Airlines"
+author:
+- Jesse Sprinkel
+- Haojin Jia
+- Chandrakanth Tolupunoori
+- Anshuman Vijayvargia
+- Priyanka Singhal
+date: "10/20/2018"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '4'
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 4
+abstract: |
+  This is the white paper and technical details of our analysis and recommendations.
+urlcolor: blue
+---
+
+## Situation:
+
+Our objective is to analyze the historical flight bookings data and
+profiles the customers into segments which would eventually help
+SunCountry to better market and advertise to their customers.
+
+## Complication:
+While the data set is quite rich and extensive, it is computationally expensive. Adding to this problem, we would like to use a technique called clustering where we attempt to find natural segments in the data. Using clustering involves a couple assumptions: we need to assume that you do have customer groups that behave differently, and we need to pick the right features to cluster on that accurately differentiate the groups. Being scientific in our approach is difficult but will allow us to base our customer segments on data as much as possible.
+
+## Our Approach
+Because the dataset is so large we ran our analysis on multiple samples of 5,000 unique trips out of the total amount of 1.17 million trips. We used a particular method of clustering called k-prototypes and separated the groups based on the following: starting city, destination, booking channel, group size, type of trip (round trip vs. one-way), time of year, membership status, and how far in advance the ticket was booked. While there may be differences between our samples and the final dataset, we think they would be negligible and not impact our final conclusions.
+
+# Preparedness
+### Brief Summary of the Dataset
+
+What does the data look like?:
+
+* 3.4M+ records containing 2 years of historical flight bookings 
+* ~ 1.1M unique booking PNRs
+* Demographic details like EncryptedName, Gender, Age, PostalCode
+* Details about Ufly Member status, TravelClass, BookingChannel  
+
+## R Libraries
+
+**Please make sure successfully install the packages before reproducing the research**
+
+```{r lib, message = FALSE, warning=FALSE,cache=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(rsconnect)
+library(R.utils)
+library(clustMixType)
+library(cluster)
+library(stringr)
+library(cowplot)
+library(magrittr)
+```
+
+**Set working directory**
+
+```{r setup, message = FALSE, warning=FALSE,cache=TRUE}
+knitr::opts_knit$set(root.dir = 'D:/Semester 2/Exploratory 6410/HW3/HW 3')
+```
+
+## Data Exploration
+
+**Load the dataset and look at the various columns and datatypes**
+
+```{r, message = FALSE, warning=FALSE,cache=TRUE}
+# Make sure data with huge numbers is read properly
+options("digits")
+# We are making the options to 14 so that it can read bigger integers. It was 7 previously.
+options(digits = 14)
+# Read the data
+suncountry <- read.csv("SunCountry.csv", stringsAsFactors = FALSE)
+# Look at the data types and head values in every column
+glimpse(suncountry)
+```
+
+**Filtering the data for SunCountry**
+
+```{r, message = FALSE, warning=FALSE,cache=TRUE}
+table(suncountry$MarketingAirlineCode)
+#We are filtering the rows which have airline as Sun Country
+Sun <- suncountry %>% filter(MarketingAirlineCode == "SY")
+```
+
+## Data Cleaning
+
+**Replacing missing values and re-grouping**
+
+```{r, message = FALSE, warning=FALSE,cache=TRUE}
+# Member status column
+table(Sun$UflyMemberStatus)
+
+#We observe that all the non-members have blank values in Status column 
+
+#We are considering flyers to be non-member if they have member status as blank.
+Sun <- Sun %>% mutate(UflyMemberStatus = ifelse(UflyMemberStatus == "", "Non Ufly Member", UflyMemberStatus))
+
+table(Sun$BookingChannel,useNA = "always")
+#We are classifying all the booking channel which were via airports as 'Other' 
+Sun$BookingChannel[Sun$BookingChannel!="Outside Booking" & 
+                      Sun$BookingChannel!="SCA Website Booking" & 
+                      Sun$BookingChannel!="Tour Operator Portal" & 
+                      Sun$BookingChannel!="Reservations Booking" & 
+                      Sun$BookingChannel!="SY Vacation"] <- "Other"
+# Converting the column to factor for later analysis
+Sun$BookingChannel<-as.factor(Sun$BookingChannel)
+```
+
+**Exploring the data for missing and erroneous values**
+
+```{r, message = FALSE, warning=FALSE,cache=TRUE}
+# GenderCode column
+table(Sun$GenderCode)
+# We see that there are blank values in GenderCode, So we removed those rows 
+Sun <- Sun %>% filter(GenderCode %in% c("F", "M", "U"))
+# birthdateid column
+summary(Sun$birthdateid)
+# There are negative values in the id, but we are not going to remove it as they are just unique id's
+
+# Age Column
+summary(Sun$Age)
+#We are removing rows with error values and select age between [0,115]
+Sun <- Sun[!(Sun$Age < 0 | Sun$Age > 115),]
+# Distribution after cleaning the Age column
+x <- Sun$Age
+#Plotting a normal distribution curve for age
+h <-hist(x, breaks=20, xlab="Age", main="Age Distribution") 
+xfit<-seq(0,110,length = 50) 
+yfit<-dnorm(xfit,mean=mean(x, na.rm = T),sd=sd(x, na.rm = T)) 
+yfit <- yfit*diff(h$mids[1:2])*length(x) 
+lines(xfit, yfit, col="blue", lwd=2)
+```
+
+**Missing and erroneous values continued**
+
+```{r, message = FALSE, warning=FALSE,cache=TRUE}
+# Coupon Sequence Number column
+table(Sun$CouponSeqNbr)
+# We can see that as the coupon seq nbr increases, count decreases.
+# We wanted to see if all PNR's is not starting with a couponSeqNo of 1.
+Sun_temp<- Sun %>% select(PNRLocatorID, CouponSeqNbr) %>% 
+  group_by(PNRLocatorID) %>% summarise(min_seq_nbr = min(CouponSeqNbr)) %>% 
+  filter(min_seq_nbr > 1)
+#Looking at the top 6 rows of Sun_temp
+head(Sun_temp)
+
+# As we can see that the min_seq_nbr is greater than 1,
+# we will remove them as the journey has to start with CouponSeqNbr 1
+Sun <- Sun %>% group_by(PNRLocatorID) %>%
+  mutate(flag = ifelse(min(CouponSeqNbr) != 1, 1, 0)) %>% filter(flag == 0)
+
+```
+
+Reference: https://www.flyuia.com/hu/en/information/uia-flight-coupons
+
+## Data Transformation
+
+  Now that we have cleaned all the variables of interest, we went ahead to create a sample to transform our columns. We also observed that we have multiple rows in single PNR for each leg of the trip for each customer. We want to aggregate the data to bring it to a level where we have one row for each customer without losing much of the other information by generating new columns and using aggregation.
+
+**Sampling the data for data transformation**
+
+  The size of the dataset is very large. So we wanted to take a sample and run all the data transformation steps on a smaller sample consisting of data related to 5000 unique PNR's. 
+```{r, message = FALSE, warning=FALSE,cache=TRUE}
+# Obtain Unique PNRs
+uniquePNRs <- unique(Sun$PNRLocatorID) 
+
+# To produce the same samples every time set the seed
+set.seed(2000)
+sample_PNRs <- sample(uniquePNRs,5000)
+
+# Obtaining data related to the sampled 5000 PNRs
+Sun_sample <- Sun %>% filter(PNRLocatorID %in% sample_PNRs)
+```
+
+**Transformation to populate the First_City for booking**
+
+  In order to aggregate multiple rows for each PNR, we need a unique id. We Assume that a combination of four columns "PaxName", "EncryptedName", "GenderCode", "birthdateid" will be able to generate a unique id needed for aggregation.
+Based on the unique id we group the data and pick the ServiceStartCity in the first row of the group as the First_City of the journey.
+
+```{r, warning = FALSE, message = FALSE}
+#Data Transformation
+library(dplyr)
+Sun_sample <- Sun_sample %>% mutate(uid=paste(PaxName,EncryptedName,GenderCode,birthdateid,sep=""))
+
+#As we can see there are multiple rows for many columns, we wanted to find a primary key by which we can group and transform the data.
+First_City <- Sun_sample %>%arrange(PNRLocatorID, CouponSeqNbr) %>% group_by(PNRLocatorID, PaxName) %>% do(data.frame(First_City = first(.$ServiceStartCity)))
+
+#Here, we join both the columns by PnrLocatorId and Passenger Name
+Sun_sample <- merge(Sun_sample,First_City,
+                   by.x=c("PNRLocatorID","PaxName"),
+                   by.y = c("PNRLocatorID","PaxName"))
+```
+
+**Transformation to populate the Last_City for booking**
+
+  Based on the unique id we group the data and pick the ServiceEndCity in the last row of the group as the Last_City of the journey.
+
+```{r, message = FALSE, warning=FALSE}
+Last_City <-Sun_sample %>%
+  arrange(PNRLocatorID,CouponSeqNbr)%>%
+  group_by(PNRLocatorID,PaxName)%>% 
+  do(data.frame(Last_City=last(.$ServiceEndCity)))
+
+Sun_sample <-merge(Sun_sample,Last_City,
+                   by.x=c("PNRLocatorID","PaxName"),
+                   by.y = c("PNRLocatorID","PaxName"))
+
+```
+
+**Transformation to find if customers stay at a destination in a round trip**
+
+  If we only look at the First_City and Last_city we might be missing out on information about the intermediate stay where the customer actually intended to travel. So we are looking at the time difference between all the legs of the journey and Assume that the one with the maximum difference and pick the ServiceEndCity of that leg as the Final_Destination.
+
+```{r warning = FALSE, message = FALSE}
+
+#Convert Service Start date to Date type
+Sun_sample$ServiceStartDate <- as.Date(Sun_sample$ServiceStartDate)
+
+#The place of maximum stay during the trip.
+Max_Stay <- Sun_sample%>%
+  arrange(PNRLocatorID, CouponSeqNbr) %>%
+  group_by(PNRLocatorID, PaxName) %>%
+  mutate(stay = lead(ServiceStartDate)-ServiceStartDate, default=0) %>%
+  select(PNRLocatorID, PaxName, ServiceStartCity, ServiceEndCity, ServiceStartDate, stay)
+Max_Stay$stay[is.na(Max_Stay$stay)] <- 0
+Max_Stay$stay <- as.numeric(Max_Stay$stay)
+
+Final_Destination <- Max_Stay %>%
+  group_by(PNRLocatorID, PaxName) %>%
+  do(data.frame(Final_Destination = first(as.character(.$ServiceEndCity)[.$stay==max(.$stay)])))
+Sun_sample <- merge(Sun_sample, Final_Destination,
+                   by.x=c("PNRLocatorID","PaxName"),
+                   by.y = c("PNRLocatorID","PaxName"))
+
+```
+
+**Transformation for round trip and group size**
+
+  We wanted to differentiate customer based on if they booked for a round trip or on way and also based on the fact that if they booked as a group or as individuals. So we generated a flag "round_trip" to capture this information based on First_City and Last_City. Then we use the unique id generated to count the group size based on the number of unique values within each PNR and then create a flag "group" if the group size is greater than 1.    
+
+```{r warning = FALSE, message = FALSE}
+Sun_sample <- Sun_sample%>%
+  mutate(round_trip = ifelse(as.character(First_City)==as.character(Last_City), 1, 0))
+
+#We look at the group size, number of people who traveled together in each trip.
+Sun_sample <- Sun_sample %>%
+  group_by(PNRLocatorID) %>%
+  mutate(group_size= length(unique(uid)))
+
+Sun_sample <- Sun_sample %>%
+  group_by(PNRLocatorID)%>%
+  mutate(group = ifelse(group_size > 1, 1, 0))
+
+```
+
+**Transformation to calculate the number of days in advance the booking was made and also look for seasonality**
+
+  We also wanted to differentiate and target our customers differently based on the number of days in advance they book their tickets and also the time of the year they travel. So we used the "ServiceStartDate" and "PNRCreateDate" to generate these two values.
+
+```{r warning = FALSE, message = FALSE}
+library(lubridate)
+Sun_sample$ServiceStartDate<-as.Date(Sun_sample$ServiceStartDate)
+#Convert ServiceStartDate from factor to Date format
+Sun_sample<- Sun_sample %>%
+  group_by(PNRLocatorID, PaxName) %>% mutate(month_no = month(ServiceStartDate))
+
+#We look at the number of days the ticket was booked in advance.
+Sun_sample$PNRCreateDate <- as.Date(Sun_sample$PNRCreateDate) 
+Sun_sample$ServiceStartDate <- as.Date(Sun_sample$ServiceStartDate)
+
+Sun_sample <- Sun_sample%>% 
+  mutate(days_pre_booked = as.numeric(floor(difftime(ServiceStartDate,
+                                                    PNRCreateDate,units=c("days")))))
+```
+
+**Selecting Columns of Interest for clustering**
+
+  Now that we have all the columns we think might impact our clustering results, we select those columns and generate the final aggregated table.
+
+```{r warning = FALSE, message = FALSE}
+#We transformed the data such that each row represents a unique customer-PNR combination.
+Sun_sample <- Sun_sample %>%
+  select(PNRLocatorID, uid, PaxName, ServiceStartDate, BookingChannel, Age,
+         UFlyRewardsNumber,UflyMemberStatus,First_City, Last_City,Final_Destination,
+         round_trip,group_size,group, month_no ,days_pre_booked)
+
+data_transformed <- Sun_sample %>%
+  group_by(PNRLocatorID, uid, PaxName) %>%
+  summarise(ServiceStartDate = first(ServiceStartDate),
+            BookingChannel = first(BookingChannel),
+            UFlyRewards = first(UFlyRewardsNumber),
+            UflyMemberStatus = first(UflyMemberStatus),
+            Age = max(Age),
+            First_City = first(First_City),
+            Last_City = last(Last_City),
+            Final_Destination = first(Final_Destination),
+            round_trip = first(round_trip),
+            group_size = first(group_size),
+            group = first(group), 
+            month_no = last(month_no), 
+            days_pre_booked = max(days_pre_booked))
+#Retaining only those attributes that are meaningful for clustering
+data_transformed <- data_transformed %>%
+  select(-PNRLocatorID, -uid, -PaxName, -ServiceStartDate, -UFlyRewards)
+
+```
+
+**Normalization the numeric columns of interest**
+
+  As we are going to use clustering, which uses distance metric to measure similarity, we wanted to bring all the numeric variables to the same scale by using Min-Max Normalization.
+```{r warning = FALSE, message = FALSE}
+normalize <- function(x){return ((x - min(x))/(max(x) - min(x)))}
+
+temp <- ungroup(data_transformed)
+
+customer_data_clust = mutate(temp,
+                     Age = normalize(Age),
+                     days_pre_booked = normalize(days_pre_booked),
+                     group_size=normalize(group_size))
+```
+
+*Explanation of Approach and Goals:*
+Using Hierarchical clustering to check how many clusters would be optimal for clustering
+  
+```{r warning = FALSE, message = FALSE}
+# Calculate distance - daizy
+customer_daizy <- customer_data_clust[,c(3:5,8:13)]
+customer_daizy$BookingChannel<-as.factor(customer_daizy$BookingChannel)
+customer_daizy$UflyMemberStatus<-as.factor(customer_daizy$UflyMemberStatus)
+customer_daizy$month_no<-as.factor(customer_daizy$month_no)
+customer_daizy$Final_Destination <- as.factor(customer_daizy$Final_Destination)
+gower_dist <- daisy(customer_daizy,
+                    metric = "gower",
+                    type = list(logratio = 3))
+h_cluster <- hclust(gower_dist, method = "ward.D")
+plot(h_cluster, hang = 0, label = F, main = "Cluster Dendrogram")
+groups<-cutree(h_cluster,k=3)
+rect.hclust(h_cluster, k = 3, border = "darkblue")
+```
+
+*Interpretation from Approach:*
+We can see from the dendrogram that the data can be separated with 3 optimal clusters.
+
+*Conclusions from Approach:*
+We decided to go ahead with 3 clusters.
+
+*Explanation of Approach and Goals 2:*
+Now we cluster the data using k-prototypes, as this will allow us to handle a mix of continuous and categorical data. We will use start city, final destination, type of trip, group size, whether it is a group, how far in advance the ticket was purchased, booking channel, and membership status to try and define the groups. First, we will plot the sum of squared errors curve to try and find the optimal number of clusters. Then, we will loop through the clustering several times to try and get a sense of generalized performance, as k-prototypes chooses random starting points for the clustering.
+```{r warning = FALSE, message = FALSE, cache = TRUE}
+prototype_data <- customer_data_clust %>% 
+  select(First_City, Final_Destination, round_trip, group_size, group, days_pre_booked, BookingChannel, UflyMemberStatus) %>% as.data.frame()
+
+SSE_curve <- c()
+for (i in 1:10){
+  sse_avg <- c()
+  k = i
+  for (t in 1:5){
+    kpro <- kproto(prototype_data, k)
+    sse <- sum(kpro$withinss)
+    sse_avg[k] <- sse
+  }
+  SSE_curve[i] <- mean(sse_avg, na.rm = T)}
+
+plot(1:10, SSE_curve, type="b", xlab="Number of Clusters", ylab="SSE")
+```
+
+*Interpretation from Approach:*
+Based on running our analysis on multiple samples, there seems to be a general cutoff point around 3 clusters. You could make an argument for a higher amount of clusters based on the elbow plot, but based on our business assumptions and other evidence from the hierarchical dendrogram we think 3 clusters is a good choice. 
+
+*Conclusions from Approach:*
+Now that we have chosen 3 as our number of clusters we can then run the clustering again and view the clusters.
+
+*Explanation of Approach and Goals 3:*
+Here we will cluster the data and try to initially visualize the results. 
+```{r warning = FALSE, message = FALSE}
+num_proto_clusters = 3
+kpro <- kproto(as.data.frame(prototype_data), num_proto_clusters)
+clprofiles(kpro, as.data.frame(prototype_data))
+```
+
+*Interpretation from Approach:*
+The data here is still normalized so it's hard to interpret some of the differences in the continuous variables, but we can see that there are some differences. Cluster 1 is mostly round-trip tickets whereas cluster 2 is individual travelers. Days booked in advance also have differences that look like they could be significant.
+
+*Conclusions from Approach:*
+As an initial exploration, we can see that there are differences between the clusters. Furthur visualizations will help us gain a better understanding of these differences.
+
+*Explanation of Approach and Goals 4:*
+Because the goal of our analysis is to understand our customers, we want to merge our clusters back into our sample data to examine the data at a lower customer level instead of a trip level.
+
+```{r warning = FALSE, message = FALSE}
+data_transformed$cluster <- kpro$cluster
+final_segments <- merge(suncountry, data_transformed, by = 'PNRLocatorID')
+# write.csv(final_segments, "final_Segments_v2.csv")
+```
+
+*Interpretation from Approach:*
+Now that our sample data has a 'cluster number' column with which we can examine the differences in between clusters in variables that we didn't cluster on.
+
+*Explanation of Approach and Goals 5:*
+Now, we are going to plot where are people in different clusters going to on a normal basis. 
+
+```{r warning = FALSE, message = FALSE}
+
+cl1_cities <- final_segments %>%
+  filter(cluster == 1 & Final_Destination != 'MSP') %>%
+  select(Final_Destination) %>%
+  group_by(Final_Destination) %>%
+  summarise(count = n()) %>%
+  arrange(count) %>% 
+  top_n(7) %>%
+  ggplot() + geom_bar(aes(sort(Final_Destination, decreasing = T), count), stat = 'identity', fill = 'green') + labs(x = 'Destinations')
+
+cl2_cities <- final_segments %>%
+  filter(cluster == 2 & Final_Destination != 'MSP') %>%
+  select(Final_Destination) %>%
+  group_by(Final_Destination) %>%
+  summarise(count = n()) %>%
+  arrange(count) %>% 
+  top_n(7) %>%
+  ggplot() + geom_bar(aes(sort(Final_Destination, decreasing = T), count), stat = 'identity', fill = 'blue') + labs(x = 'Destinations')
+
+cl3_cities <- final_segments %>%
+  filter(cluster == 3 & Final_Destination != 'MSP') %>%
+  select(Final_Destination) %>%
+  group_by(Final_Destination) %>%
+  summarise(count = n()) %>%
+  arrange(count) %>% 
+  top_n(7) %>%
+  ggplot() + geom_bar(aes(sort(Final_Destination, decreasing = T), count), stat = 'identity', fill = 'red') + labs(x = 'Destinations')
+  
+plot_grid(cl1_cities, cl2_cities, cl3_cities)
+```
+
+*Interpretation from Approach:*
+Cluster 1 is flying to locations like Cancun, Las Vegas, LA, and Orlando which suggests these might be vacationers. Cluster 2 flies most often to cities like Boston, D.C, New York. Considering that these are solo travelers it is possible they are flying for business or other non-vacation reason. Cluster 3 flies heavily to Dallas, and also to a mix of vacation cities. It is less clear what this could mean.
+
+*Conclusions from Approach:*
+The clusters are exhibiting differences in destinations that they are visiting, we can now further see what defines the segments. 
+
+*Explanation of Approach and Goals 6:*
+We want to look at the age distribution to see if we can see any insights. Based on the destinations and group sizes of the clusters, we think that cluster 1 could be families looking to vacation and cluster 2 could be solo travelers going for business or other reasons. 
+
+```{r, warning = FALSE, message = FALSE}
+library(cowplot)
+h1 <- final_segments %>%
+  filter(cluster == 1) %>%
+  select(Age.x) %>%
+  ggplot() + geom_histogram(aes(Age.x), fill = 'blue', stat = "identity") + labs(title = 'Age Distribution', x = 'Age')
+
+h2 <- final_segments %>%
+  filter(cluster == 2) %>%
+  select(Age.x) %>%
+  ggplot() + geom_histogram(aes(Age.x), fill = 'red', stat = "identity") + labs(title = 'Age Distribution', x = 'Age')
+
+h3 <- final_segments %>%
+  filter(cluster == 3) %>%
+  select(Age.x) %>%
+  ggplot() + geom_histogram(aes(Age.x), fill = 'green', stat = "identity") + labs(title = 'Age Distribution', x = 'Age')
+
+plot_grid(h1, h2, h3)
+```
+
+*Interpretation from Approach:*
+Cluster 1 has 2 distinct groups which suggest that these represent parents and their children. Cluster 2 is clearly more centered around the working ages of 20-60 which could mean that these are that "business" group which we think is there. Again, cluster 3 seems to be somewhat of a mix, but it is worth noting that it captures more of the retirement ages than the other groups. 
+
+*Conclusions from Approach:*
+We now can say that cluster 1 appears to be families, cluster 2 solo travelers for business or other reasons, and cluster 3 looks like a mix, possibly some other traveling groups like tours and also some "snow birds" escaping the winter. 
+
+*Explanation of Approach and Goals 7:*
+After the clustering we saw the differences in group size with the normalized data, now we can look at it in real terms to get a sense of the distributions. 
+
+```{r, warning = FALSE, message = FALSE}
+groups_c1 <- final_segments %>%
+  filter(cluster == 1) %>%
+  select(group_size) %>%
+  group_by(group_size) %>%
+  summarise(count = n()) %>%
+  ggplot() + geom_bar(aes(sort(group_size, decreasing = T), count), stat = 'identity', fill = 'red') + labs(x = 'Group size')
+
+groups_c2 <- final_segments %>%
+  filter(cluster == 2) %>%
+  select(group_size) %>%
+  group_by(group_size) %>%
+  summarise(count = n()) %>%
+  ggplot() + geom_bar(aes(sort(group_size, decreasing = T), count), stat = 'identity', fill = 'blue') + labs(x = 'Group size')
+
+groups_c3 <- final_segments %>%
+  filter(cluster == 3) %>%
+  select(group_size) %>%
+  group_by(group_size) %>%
+  summarise(count = n()) %>%
+  ggplot() + geom_bar(aes(sort(group_size, decreasing = T), count), stat = 'identity', fill = 'green') + labs(x = 'Group size')
+plot_grid(groups_c1,groups_c2,groups_c3)
+```
+
+*Interpretation from Approach:*
+Cluster 1 has a large outlier that skews the results, but it looks like it matches the distribution for cluster 3 in terms of size. Both groups have a small spike for couples, and then some more groups of 3-10, and then another spike around 20. Cluster 2 is all single travelers. 
+
+*Conclusions from Approach:*
+In terms of group size, cluster 1 and 3 behave similarly. An interesting thing to note is that in both clusters 1 and 3 there is a significant amount of couples. This weakens our argument that cluster 1 is families somewhat, but we think this could just be due to noise. 
+
+*Explanation of Approach and Goals 8:*
+To understand consumer behavior, it is important to see whether groups behave differently in terms of when they book their tickets. Here we will plot a distribution of the days in advance of the trip for ticket purchase. 
+
+```{r, warning = FALSE, message = FALSE}
+
+h1 <- final_segments %>%
+  filter(cluster == 1) %>%
+  select(days_pre_booked) %>%
+  ggplot() + geom_histogram(aes(days_pre_booked), fill = 'blue') + labs(title= 'days between purchase and departure', x = 'days')
+
+h2 <- final_segments %>%
+  filter(cluster == 2) %>%
+  select(days_pre_booked) %>%
+  ggplot() + geom_histogram(aes(days_pre_booked), fill = 'red') + labs(title= 'days between purchase and departure', x = 'days')
+
+h3 <- final_segments %>%
+  filter(cluster == 3) %>%
+  select(days_pre_booked) %>%
+  ggplot() + geom_histogram(aes(days_pre_booked), fill = 'green') + labs(title= 'days between purchase and departure', x = 'days')
+
+plot_grid(h1, h2, h3)
+```
+
+*Interpretation from Approach:*
+Cluster 1 books well in advance, with most of the records coming more than 300 days in advance. Cluster 2 is booked closer to departure date.
+
+*Conclusions from Approach:*
+Cluster 1 makes sense because families like to plan their vacations well in advance because of limited vacation time. Cluster 2 make sense as people in this cluster are traveling for business reasons too.
