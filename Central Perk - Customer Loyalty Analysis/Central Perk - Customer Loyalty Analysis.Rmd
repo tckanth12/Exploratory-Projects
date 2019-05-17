@@ -1,0 +1,728 @@
+---
+title: "HW4 6410 - Central Perk - Group 7"
+author: "Coltt Thunstrom, Chandrakanth Tolupunoori, Erik Tonsfeldt, Raghuveer Rao Vijjini, Tanmayee Waghmare"
+date: "November 2, 2018"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: 3
+urlcolor: blue
+---
+
+# Introduction  
+
+
+## Central Perk's Situation 
+
+Central Perk is a boutique coffee shop in New York City. The owners assert that they have a loyal customer base, however, they have asked our team to test their assumption and analyze historical sales data in order to uncover true demand patterns. The owners hope to understand their customer behavior better so that they can develop incentives and pricing adjustments to both normalize demand while simultaneously generating additional revenue.
+  
+## The Business Problem and Approach
+
+Our overall objective was to 'smooth demand' i.e. spread it more across the entire timeframe. We looked at demand trends and observed three cyclical patterns: monthly, weekly, and hourly. As a result, our recommendations target each one of these patterns and aim to lift the low-demand times, days, and months through offering new products, bundled products, discount coupons, and happy hours. By addressing each issue, Central Perk owners can generate greater demand during traditionally low-demand periods and realize higher profits for their investors.
+
+Understanding this basic need we structured our analysis as follows:  
+
+1. Data cleaning
++  Central Perk's data contained some anomalies, from which we tried to impute and clean where possible.
++  We created new columns which can be used for granular analysis.
+2. Exploratory Analysis
++  Defined Loyal customers and compared them with the others at various levels.
++  Looked for demand patterns across months, days, hours and so on.
++  Came up with suggestions to smooth demand.
+3. Clustering
++  We clustered using K-modes on select variables which could provide unique clusters.
++  Tried to visualize the clusters to identify distinct features. 
+4. Association Rules
++  Explored association rules to find possibilities to bundle products.
+
+# Data Cleaning and Reshaping
+
+#### Set working directory
+```{r setup, include=F}
+# Save your root directory below:
+# Change 'setwd' to your initials when you're working
+RR <- ''
+Coltt <- ''
+CT <- 'D:/Fall Term/MSBA 6410 - EDA- Viz/Homeworks/HW 4'
+ET <- ''
+TW <- ''
+# Change 'path' to your initials when you're working to access data files
+RR_path <- ''
+Coltt_path <- ''
+CT_path <- 'D:/Fall Term/MSBA 6410 - EDA- Viz/Homeworks/HW 4/Central Perk'
+ET_path <- ''
+TW_path <- ''
+path = CT_path
+
+knitr::opts_knit$set(root.dir = CT)
+knitr::opts_chunk$set(comment = NA)
+rm(RR, Coltt, CT, ET, TW)
+```
+
+
+#### Load Necessary Packages
+```{r message=FALSE}
+library(rmarkdown)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+library(data.table)
+library(stringr)
+library(lubridate)
+library(clustMixType)
+library(cluster)
+library(arules)
+library(Rtsne)
+library(klaR)
+library(scales)
+library(ggpubr)
+library(png)
+library(grid)
+```
+
+
+```{r include=F}
+col1 <- "#F5F1E0"
+col2 <- "#A8122A"
+col3 <- "#00351B"
+
+myTheme <- theme_classic() + theme(axis.text = element_text(size = 10),
+                          axis.title = element_text(size = 12),
+                          title=element_text(size=14), 
+                          plot.title = element_text(hjust = 0.5),
+                          plot.subtitle = element_text(hjust = 0.5))
+```
+
+#### Initialize Normalization Function for Distance Calculations  
+```{r}
+#Creating a normalizing function
+normalize <- function(x){
+  return ((x - min(x))/(max(x) - min(x)))}
+```
+
+#### Loading the Data
+```{r warning=FALSE}
+# Merging datafiles of the years 2016, 2017, 2018 
+filenames <- list.files(path = path, pattern = "*", full.names=TRUE)
+central <- ldply(filenames, read.csv)
+glimpse(central)
+```
+
+## Specific Cleaning Steps and Rational  
+1. We cleaned the Sales columns by removing special characters and converted them to numeric values.
+ + This will help us while aggregrating the data to hourly, daily and monthly levels to observe trends.
+2. We only retained the rows which had positive Net Sales in order to focus our analysis on Sales and not on Returns/ Refunds.
+ + We assume that Central Perk will find more value in this level of analysis.
+ + This will also clean the Quantity column which gets rid of negative values related to refunds.
+3. We remove rows that contain NULL in Price.Point.Name column, we found that these rows were correlated with Category errors, which was 'None', so it made sense to drop them completely.
+ + We assume that the Category is not, NMAR (not missing at random).
+ + We assume that both 'Regular' and 'Regular Price' are same and hence replace 'Regular Price' with 'Regular'. 
+4. We updated the 'NA' values in Customer.ID column to 'NoInfo' and also generated a binary column with 'yes/no' based on the information related to customer.
+ + We assume that only the customers paying with a card have an encrypted Customer.ID and others are 'NA'
+ + We assume that this will be helpful while exploring purchase patterns for Customers and also while performing clustering analysis.
+5. We then cleaned the 'Item' column to remove redundant information and renamed 'Price.Point.Name' column to `Size/Type` which makes more sense.
+6. We then created 'TimeStamp' column from Date and Time columns.
+ + This will help us with our TimeSeries analysis for observing demand patterns.
+7. Finally we removed redundant data columns and also check for duplicate records and remove them.
+ + Tax does not appear until November 7th, 2017, so we decided to not look at the column.
+ + We found close to 4k duplicate records, we assume that these observations were genarated from data entry erros and should not be included in the analysis.
+
+#### Looking for errors in the data
+```{r, message = FALSE, warning=FALSE}
+#Identifying the columns with NA values
+colnames(central)[colSums(is.na(central)) > 0]
+
+table(central$Qty)
+unique(central$Item)
+unique(central$Price.Point.Name)
+head(central$Gross.Sales)
+```
+
+#### Data Cleaning and Transformation
+```{r, message = FALSE, warning=FALSE}
+clean <- central %>%
+  dplyr::rename(`Size/Type` = Price.Point.Name) %>%
+  filter(!(Event.Type == "Refund")) %>%
+  filter(!is.na(Qty)) %>%
+  filter(!(Date == 'Unknown Error')) %>%
+  mutate(Item = as.character(Item)) %>%
+  filter(Item != 'Custom Amount' & Category != 'None') %>%
+  mutate(Item = str_trim(str_replace(Item, "SM$", ""))) %>%
+  mutate(Item = str_trim(str_replace(Item, "LG$", ""))) %>%
+  mutate(Item = str_replace(Item, "ðY\u008d<LemonadeðY\u008d<", "Lemonade")) %>%
+  mutate(Gross.Sales = as.numeric(substring(Gross.Sales, 2)),
+         Net.Sales = as.numeric(substring(Net.Sales, 2)),
+         Profit = round(.2 * Gross.Sales, 2)) %>%
+  mutate(Timestamp = as.POSIXct(paste(Date, Time), format="%m/%d/%y %H:%M:%S"),
+         Hour = factor(hour(Timestamp)),
+         Month = factor(month(Timestamp)),
+         Weekday = factor(weekdays(Timestamp))) %>%
+  mutate(Season = as.factor(ifelse(Month %in% c(12, 1, 2), 'Winter', 
+                            ifelse(Month %in% c(3, 4, 5), 'Spring',
+                            ifelse(Month %in% c(6, 7, 8), 'Summer', 'Autumn'))))) %>%
+  mutate(Time.of.Day = as.factor(ifelse(Hour %in% c(6, 7, 8, 9, 10), 'Morning', 
+                                 ifelse(Hour %in% c(11, 12, 13, 14, 15),
+                                        'Afternoon', 'Night')))) %>%
+  mutate(Customer.ID = ifelse(is.na(as.character(Customer.ID)),
+                              'NoInfo', as.character(Customer.ID))) %>%
+  mutate(Cust_Y.N = as.factor(ifelse(Customer.ID == 'NoInfo', 'No', 'Yes'))) %>%
+  mutate(`Size/Type` = str_replace(`Size/Type`, "Regular Price", "Regular")) %>%
+  dplyr::select(-c(Date, Time, Gross.Sales, Tax, Event.Type, Discounts, Notes))
+
+clean <- clean[!duplicated(clean), ]
+```
+
+# Loyal Customer?
+
+## Analysis and Our View Point
+
+*Description and Rationale for the Chosen Analysis:*
+Define loyal customer as those who visit the store atleast once in a week in general, should have made a transaction within the last 60days(We have data till August-2018) and should have been a customer for atleast a month. Based on this definition, determine which customers are 'loyal'. This will help us either accept or reject the belief of Central Perk.Finally, visualizing behavioral differences between loyal customers and other customer by comparing summary statistics to gain more insights into the buying trends.
+
+*Execution and Results:*
+```{r, message = FALSE, warning=FALSE}
+library(dplyr)
+
+# Assume that once a week = a loyal customer
+loyal_cust_density <- 1/7
+
+# Filter data to only include 'known' customers - that is, customers with an ID.
+# Determine the customers duration, number of transactions, and profit
+# Filter for duration greater than 30(indicates month of potential days of visit)
+# Mutate to include a 'loyalty' factor based on the ratio of transactions to duration
+# Finally, filter loyal customers as those with density higher than 1/7
+
+loyal_customers  <- clean %>%
+  filter(!(Customer.ID == 'NoInfo')) %>%
+  group_by(Customer.ID) %>%
+  dplyr::summarise(most_recent = max(Timestamp),
+            duration = max(Timestamp) - min(Timestamp),
+            transactions = n_distinct(Timestamp),
+            profit = sum(Profit)) %>%
+  filter((duration > 30) & (most_recent > '2018-07-01')) %>%
+  mutate(density = transactions / as.integer(duration)) %>%
+  filter(density >= loyal_cust_density)
+
+
+loyal_customers_IDs <- dplyr::select(loyal_customers, Customer.ID)
+# Calculate the number of loyal customers to caompare with total customer base
+nrow(loyal_customers_IDs)
+n_distinct(clean$Customer.ID) - 1 # subtract 1 to remove 'NoInfo'
+```
+*Interpretation and Conclusions:*
+From the output we can clearly see that only 119 out of 31811(known customers - those with ID's) are loyal. That means not even 1% of the customer base is loyal. Hence, based on our definition of loyal customers, we would like to reject the belief that Central Perk has loyal customers.
+
+## Comparing Loyal customers with others
+
+*Description and Rationale for the Chosen Analysis:*
+Now that we can identity our loyal customers, we wanted to compare their usual buying patterns against other customers.   
+```{r}
+# First the loyal customers
+loyal <- subset(clean, Customer.ID %in% loyal_customers_IDs$Customer.ID)
+summary(loyal)
+
+# Then the other customers
+other <- subset(clean, !(Customer.ID %in% loyal_customers_IDs$Customer.ID))
+summary(other)
+
+# Tidy the data for visulizing by adding a customertype label
+loyal <- mutate(loyal, customertype = 'loyal')
+other <- mutate(other, customertype = 'other')
+combined <- rbind(loyal, other)
+```
+*Interpretation:*
+Just by looking at the summary statistics for the two groups we can see that there are some differences like, time of the day they visit(peak rush hour) and so on. So we wanted to go ahead and visualize these differences using plots, from which we can learn more about our loyal customers 
+
+## Visualizing the Differences
+```{r}
+# Compare Category of items purchased
+ggplot(combined, aes(x=customertype, fill=factor(Category))) +
+  geom_bar(position = "fill") +
+  labs(title = "Compare Category Proportions",
+       y = "Proportion", x = "Customer Type") + 
+  myTheme
+```
+*Interpretation:*
+From the above bar plot, we can see that loyal customers purchases a higher proportion of coffee compared to other customers. Also proportion of Extras for loyal customers is less compared to other.
+
+```{r}
+# Comapre Size/Type of items purchased
+ggplot(combined, aes(x=customertype,fill=factor(`Size/Type`))) + 
+  geom_bar(position = "fill") + 
+  labs(title = "Compare Item Proportions",
+       y = "Proportion", x = "Customer Type") +
+  myTheme
+```
+*Interpretation:*
+Proportion of 'Large' items ordered by loyal customers is higher as compared to other customers. 
+
+```{r}
+# Hour
+ggplot(combined, aes(x=customertype,fill=factor(Hour))) + 
+  geom_bar(position = "fill") +
+  labs(title = "Compare Transaction Volume by Hour",
+       y = "Proportion", x = "Customer Type") + 
+  myTheme
+```
+*Interpretation:*
+From the above visualization, we can see that loyal customers tend to visit much earlier in the day. More than 50% of loyal customers visit during the hours 6-9am as compared to 25% for other customers. This might be because most of the loyal customers might be grabing coffee on their way to work.
+
+```{r}
+# Month
+ggplot(combined, aes(x=customertype,fill=factor(Month))) + 
+  geom_bar(position = "fill") +
+  labs(title = "Compare Transaction Volume by Month",
+       y = "Proportion", x = "Customer Type") +
+  myTheme
+```
+*Interpretation:*
+Proportion of traansaction volume is uniformly distributed across all the months, both for loyal and other customers. 
+
+## More Granular Comparision
+
+#### Comparing overall profit
+```{r}
+# Profit contribution by 'loyal' vs 'other'
+ggplot(combined, aes(x=customertype, y=Profit)) +
+  geom_bar(stat='identity', fill=col3) +
+  labs(title = "Compare Overall Profit",
+       y = "Overall Profit", x = "Customer Type") +
+  myTheme
+```
+
+```{r}
+# However, as can be seen below, profit per loyal customer vs profit per other customer is in stark contrast.
+profit_per_loyal <- sum(loyal$Profit) / n_distinct(loyal$Customer.ID)
+profit_per_other <- sum(other$Profit) / n_distinct(other$Customer.ID)
+print("loyal:")
+print(profit_per_loyal)
+print("others:")
+print(profit_per_other)
+```
+
+#### Comparing Average profit
+```{r}
+type = c("loyal", "others")
+values = c(72.0, 4.2)
+
+x = cbind(type, values)
+dx <- data.frame(x)
+dx$values <- as.numeric(values)
+ggplot(dx, aes(type, values)) +
+  geom_bar(stat = 'identity', fill=col3) +
+  labs(title = "Average Profit Comparison",
+       y = "Average Profit($)", x = "Customer Type") +
+  myTheme
+
+```
+
+*Interpretation:*
+From the above visualization we see that loyal customers overall profit is much lower in contribution than other customers. This is because we only have 119 loyal customers. To compare them, we want to look at profit per customer. Clearly loyal customers contribute a lot per person, nearly '$72' as compared to '$4' for other customers. This, is an indicator that if we can increase our loyal customer base it will eventually improve our profits.  
+
+
+```{r}
+# Changing gears and looking at profit drivers in category.
+category_profits <- clean %>%
+  group_by(Category) %>%
+  dplyr::summarise(contribution = sum(Profit))
+
+ggplot(category_profits, aes(x = Category, y = contribution)) +
+  geom_bar(stat = 'identity', fill=col3) +
+  labs(title = "Profit by Category",
+       y = "Overall Profit", x = "Category") + myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+*Interpretation:*
+Being a coffee shop it is no wonder that the top selling category is Coffee. We can maybe leverage the next best category, Food, in combination with Coffee in order to increase purchases.
+
+
+```{r}
+hour_transactions <- clean %>%
+  group_by(Hour) %>% dplyr::summarise(No.of.Transactions = n_distinct(Timestamp))
+
+ggplot(hour_transactions, aes(x = Hour, y = No.of.Transactions)) +
+  geom_bar(stat = 'identity', fill = col3) +
+  labs(title = "Transactions by Hour") + myTheme
+```
+*Interpretation:*
+Looking at transactions by hour, we see that demand is relatively stable at 7am and from 12 to 3pm with spikes between 8 and 11am. Also, demand falls off precipitously and steadily from 4pm to closing time. This suggest us that we might need to come up with some offers during the evening hours to increase customer inflow during that period.
+
+
+```{r}
+hour_transactions <- clean %>% filter(Category == 'Beers') %>%
+  group_by(Hour) %>% dplyr::summarise(No.of.Transactions = n_distinct(Timestamp))
+
+ggplot(hour_transactions, aes(x = Hour, y = No.of.Transactions)) +
+  geom_bar(stat = 'identity', fill = col3) +
+  labs(title = "Beers Demand by Hour") + myTheme
+```
+
+*Interpretation:*
+The demand for beers by hour peaks between 5-7pm in the evening and this is the time when coffee demand starts declining. This might be because the customers who drink coffee and beers are different. But as we can see the number of transactions from the entire dataset is very less. If we can incentivize our coffee customers with some kind of coupons for Non- Caffeinated drinks and make them visit the store during the evening hours we might improve our Beer sales and increase our overall sales in the evening hours before closing.   
+
+
+```{r}
+# Month
+month_txn <- clean %>% group_by(Month) %>%
+  dplyr::summarise(No.of.Transactions = sum(Profit))
+
+ggplot(month_txn, aes(x = Month, y = No.of.Transactions)) +
+  geom_bar(stat = 'identity', fill = col3) +
+  labs(title = "Transactions by Month") + myTheme
+```
+*Interpretation:*
+Looking at transactions by month, we see that demand is less in the winter months from November through February.
+
+*Description and Rationale for the Chosen Analysis:*
+If we can find items that are often purchased in quantities greater than 1, we can come up with some bundles to increase our sales by upselling such items. 
+
+```{r}
+item_quantity <- clean %>% group_by(Item) %>%
+  dplyr::summarise(quantity = mean(Qty)) %>%
+  filter(quantity > 1.1)
+
+ggplot(item_quantity, aes(x = Item, y = quantity)) +
+  geom_bar(stat = 'identity', fill=col3) + 
+  labs(title = "Items Purchased in Quantity greater than 1") +
+  myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+*Interpretation:*
+All the items in the above chart are often purchased in quantities greater than 1 and hence we can try experiment some bundles with these items and based on the response either stick with bundles or discard this idea.
+
+
+```{r}
+# Day of the Week
+by_day_txn <- clean %>% group_by(Weekday) %>%
+  dplyr::summarise(No.Of.Transactions = n_distinct(Timestamp))
+
+ggplot(by_day_txn, aes(x = reorder(Weekday, -No.Of.Transactions), y = No.Of.Transactions)) +
+  geom_bar(stat = 'identity', fill = col3) +
+  labs(title = "Transactions by Day of Week", x = "Weekday") + myTheme
+```
+*Interpretation:*
+Looking at transactions by day, we see that demand is highest on weekends and flat during the weekdays. This is expected to be the usual trend.
+
+```{r}
+# Looking at sales by day
+weekends <- filter(clean, Weekday == 'Saturday' | Weekday == 'Sunday')
+weekends <- mutate(weekends, daycategory = 'weekend')
+weekdays <- filter(clean, Weekday != 'Saturday' & Weekday != 'Sunday')
+weekdays <- mutate(weekdays, daycategory = 'weekday')
+
+combined_daycats <- rbind(weekends, weekdays)
+
+weekdays_rev <- dplyr::summarise(weekdays, tot_rev = sum(Net.Sales))
+weekend_rev <- dplyr::summarise(weekends, tot_rev = sum(Net.Sales))
+
+combined_daycat_rev <- rbind(weekdays_rev, weekend_rev)
+
+ungroup(combined_daycat_rev) %>%
+  mutate(tot_r = tot_rev, pct_rev = tot_rev*100/sum(tot_rev))
+
+combined_daycat_rev %>% dplyr::summarise()
+```
+*Interpretation:*
+We see that 62.8% of sales are on weekdays and 37.2% are on weekends. Even though weekend comprises of only two days a large portion of sales is happening on the Weekend. This indicates that there is a scope for improvement during the weekdays.
+
+# Understanding the Demand Pattern across Categories
+
+## Overall Category Demand
+
+*Description and Rationale for the Chosen Analysis:*
+We wanted to understand the demand for items across various categories in order to get a better understanding of areas which can be explored for potential development.
+
+```{r}
+#Plotting the demand in percentage across all the categories
+g1 = ggplot(clean, aes(x = Category))+
+  geom_bar(aes(y = (..count..)/sum(..count..)), fill=col3) +
+  geom_text(aes(y = ((..count..)/sum(..count..)),
+                label = scales::percent((..count..)/sum(..count..))),
+            stat = "count", vjust = -0.20) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Category Demand", y = "Percent", x = "Category")
+
+g1 + scale_x_discrete(labels=c('Beans', 'Beers', 'Cereal', 'Coffee',
+                               'Extras', 'Food', 'Non-Caffeinated', 'Tea')) +
+  theme(axis.text.x = element_text(size=9, angle=25)) + myTheme
+```
+*Interpretation:*
+The top three categories in demand are coffee (59%), Extras (21%) and Food (13%).
+
+```{r}
+#Sorting the item column to identify the top 20 items with highest demand
+top_items <- sort(table(clean$Item),decreasing=T)
+head(top_items, n=20)
+```
+
+## Category Demand by Month, Day and Hour
+
+*Description and Rationale for the Chosen Analysis:*
+We want to analyse how the categories fare across different timelines - month, days, hour - in increasing granularity to gain more insights into the demand patterns.
+
+```{r}
+#Now we check how the demand for the categories fare across the 12 months
+cat_demand_month = with(clean, table(Category, Month))
+
+c <- data.frame(cat_demand_month)
+ggplot(data = c, aes(x = Month, y = Freq, color = Category, group=Category))+
+  geom_line() + 
+  labs(title = "Category Demand by Month",
+       y = "Count", x = "Month") + myTheme
+```
+
+
+```{r}
+#Analysing the demand across categories by hour
+cat_demand_hour = with(clean, table(Category, Hour))
+
+#In order to plot the category demand across hours, we convert the above table into a dataframe
+d <- data.frame(cat_demand_hour)
+ggplot(data = d, aes(x = Hour, y = Freq, color = Category, group=Category))+
+  geom_line() + 
+  labs(title = "Category demand by Hour",
+       y = "Count", x = "Hour") + myTheme
+```
+
+```{r}
+#Let us now analyse how the net sales across categories fare across months
+s <- aggregate(Net.Sales ~ Category + Month, clean, sum)
+
+ggplot(data = s, aes(x = Month, y = Net.Sales, color = Category, group=Category))+
+  geom_line() +labs(title = "Net Sales Demand Category by Month",
+                    y = "Net Sales", x = "Category") + 
+  myTheme 
+```
+
+
+```{r}
+#Let us now analyse how the net sales across categories fare across days of week
+s <- aggregate(Net.Sales ~ Category + Weekday, clean, sum)
+
+ggplot(data = s, aes(x = Weekday, y = Net.Sales,
+                     color = Category, group=Category))+
+  geom_line() + labs(title = "Net Sales Demand Category by Weekday",
+                    y = "Count", x = "Category") + myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Clustering
+
+*Description and Rationale for the Chosen Analysis:*  
+The rationale behind clustering is to see if we can segment our customers into specific groups. If the clustering information is useful, then we will better understand our customer base and behavior, and we can even tailor our marketing strategies and implementations based on clusters. Clustering that included multiple variables yielded terrible results, so we decided to only do it on the time of day and whether or not a transaction had an ID (we treated this as either you are or are not a customer). 
+
+## K-modes clustering
+
+*Execution and Results:*
+```{r}
+clean_clust <- dplyr::select(clean, Time.of.Day, Cust_Y.N)
+
+set.seed(1)
+
+sil_curve <- c()
+for (k in 1:6) {
+  kfit <- kmodes(clean_clust, k)
+  #PAM interally computes the silhouette measure
+  sil_curve[k] <- sum(kfit$withindiff)
+}
+sil_curve = sil_curve[1:6]
+plot(1:6, sil_curve, type="b", xlab="Number of Clusters", ylab="Silhouette")
+```
+
+*Interpretation and Conclusion:*
+There were six possible combinations of clusters, and this plot indicates that we should use all 6 because there is a considerable drop in the silhouette coefficient when going from 5 clusters to 6 clusters.
+
+
+## Visualization and Interprettion of Clusters
+```{r, message=FALSE}
+# Choose six clusters
+k = 6
+
+kfit <- kmodes(clean_clust, k)
+clean_clust$cluster <- kfit$cluster
+
+clean_clust$Category <- clean$Category
+clean_clust$Category <- mapvalues(clean_clust$Category,
+                                  from = 'Non-Caffeinated Drinks', to = 'Decaf')
+clean_clust$Season <- clean$Season
+
+
+table(clean_clust$cluster, clean_clust$Time.of.Day)
+table(clean_clust$cluster, clean_clust$Cust_Y.N)
+# six different customers split by time of day and whether or not they are a member
+table(clean_clust$cluster, clean_clust$Season)
+table(clean_clust$cluster, clean_clust$Category)
+
+# Percentage of seasons across clusters
+clust_1 = dplyr::filter(clean_clust, cluster == 1)
+season_1 = ggplot(clust_1, aes(Season)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 1') +
+  myTheme
+
+clust_2 = dplyr::filter(clean_clust, cluster == 2)
+season_2 = ggplot(clust_2, aes(Season)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 2') +
+  myTheme
+
+clust_3 = dplyr::filter(clean_clust, cluster == 3)
+season_3 = ggplot(clust_3, aes(Season)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 3') +
+  myTheme
+
+clust_4 = dplyr::filter(clean_clust, cluster == 4)
+season_4 = ggplot(clust_4, aes(Season)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 4') +
+  myTheme
+
+clust_5 = dplyr::filter(clean_clust, cluster == 5)
+season_5 = ggplot(clust_5, aes(Season)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 5') +
+  myTheme
+
+clust_6 = dplyr::filter(clean_clust, cluster == 6)
+season_6 = ggplot(clust_6, aes(Season)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 6') +
+  myTheme
+
+ggarrange(season_1,season_2,season_3,season_4,
+          season_5,season_6,nrow = 3, ncol = 2, labels = c(1:6))
+
+```
+
+*Interpretation and Conclusion:*
+The tables give us a good indication of the distribution we see from clustering. We have 6 distict clusters that are completely separated by time of day, and whether or not they were a recognized customer. In regard to Season, it does not seem like there is much of a difference in the proportion of seasons between clusters; summer is always the largest, followed by spring, fall, and finally, winter. There is some contention, however, that autumn and spring are about even for clusters 3 and 6. The fact that winter is the lowest confirms what we had found earlier, and it is an indication that we may need to do something to increase demand during the winter.
+
+
+
+```{r}
+cat_1 = ggplot(clust_1, aes(Category)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 1') +
+  myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cat_2 = ggplot(clust_2, aes(Category)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 2') +
+  myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cat_3 = ggplot(clust_3, aes(Category)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 3') +
+  myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cat_4 = ggplot(clust_4, aes(Category)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 4') +
+  myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cat_5 = ggplot(clust_5, aes(Category)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 5') +
+  myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+cat_6 = ggplot(clust_6, aes(Category)) + 
+  geom_bar(aes(y=..count../sum(..count..)), fill=col3) + 
+  scale_y_continuous(labels=percent_format()) +
+  ylab('Percentage') + 
+  ggtitle('Cluster 6') +
+  myTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggarrange(cat_1,cat_2,cat_3,cat_4,cat_5,cat_6,
+          nrow = 3, ncol = 2, labels = c(1:6))
+
+```
+
+*Interpretation and Conclusion:*
+Just as we saw with the previous six charts, the distribution of categories purchased is more or less the same. That being said, there seems to be a larger amount of food being purchased in the morning and the afternoon. On the contrary, beer is purchased almost exclusively at night, which is intuitive. We also see that tea and decaffeinated drinks are purchased with more frequency during the afternoon and night, which is also intuitive since people do not want to be kept awake by caffeine. This information provides a picture of our customer's behavior, and we can use it to strategically come up with product recommendations.
+
+
+# Association Rules on Category
+
+*Description and Rationale for the Chosen Analysis:*
+We wanted to use association rules to see whether we can further gain non-obvious insights into our customers' purchase behavior. We tried using the data set as a whole (only factor variables), but we were not obtaining any beneficial information. We then decided to turn the category factor into a item matrix to see if specific categories were co-purchased.
+
+
+*Execution and Results:*
+```{r}
+# We see that food an coffee purchased together a lot; use for Erik's recommendation
+
+new_cats <- ddply(clean,c("Timestamp"),
+                  function(df1)paste(df1$Category, collapse = ","))
+
+new_cats$Timestamp <- NULL
+colnames(new_cats) <- c("cats")
+write.csv(new_cats,"new_cats.csv", quote = FALSE, row.names = TRUE)
+
+txn_cats = read.transactions(file="new_cats.csv", rm.duplicates= TRUE,
+                             format="basket",sep=",",cols=1)
+
+txn_cats@itemInfo$labels <- gsub("\"","",txn_cats@itemInfo$labels)
+
+summary(txn_cats)
+rules <- apriori(txn_cats, parameter = list(sup = 0.01, conf = 0.5, target="rules"),
+                 control = list (verbose=F)) %>%
+  subset(subset = lift > 0) %>%
+  sort(by = "lift")
+inspect(rules)
+
+```
+
+*Interpretation and Conclusion:*
+The rules were subject to some constraints: 
+1) The support must be at least .01 so infrequent occurences do not appear.
+2) Confidence was set to .5 to ensure that the variables are conditional.
+
+After applying the constraints, we can see that extras are purchased with coffee, as are food. This finding supports our earlier points, and it is one that we can exploit for a recommendation regarding the bundling of products.
+
+
+# Recommendations
+
++ Implement a punch card for a free coffee for frequent visitors.
++ Offer a liquor shot as an extra in winter and offer a "buy any two food items, get one coffee free" deal.
++ Offer a discount on coffee from noon to 5:00 P.M., and administer a survey to loyal customers.
++ Offer a "BOGO" beer coupon to morning customers for a newly implement happy hour from 5PM to 7PM.
++ Gather costs to discern our best and worst items in terms of profit for better analysis related to profit.
+
